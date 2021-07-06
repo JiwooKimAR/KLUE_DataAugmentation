@@ -17,7 +17,7 @@ from transformers import (
     AutoModelForTokenClassification,
 )
 
-from utils import ( set_seed, NER_CLASSES, get_label_list, re_preprocessing, DATASET_FEATURES, str2bool, )
+from utils import ( set_seed, NER_CLASSES, get_label_list, re_preprocessing, str2bool, )
 from data_augmentation import DataAugmentationMethod
 from mixup.utils import MixupAutoModelForSequenceClassification, MixupTrainer
 
