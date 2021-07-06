@@ -43,6 +43,8 @@ p_args = parser.parse_args()
 start = time.time()
 
 set_seed(p_args.seed)
+if not os.path.exists(p_args.result_dir):
+    os.makedirs(p_args.result_dir)
 
 """
 TC(Topic Classification), STS(Semantic Textual Similarity), NLI(Natural Langauge Inference),
@@ -115,6 +117,7 @@ if p_args.aug:
     # Save json file to local
     #datasets["train"].to_json(f"data/{KLUE_TASKS[p_args.task]}/train.json", orient="records", force_ascii=False, indent=2, lines=False, )
     #datasets["validation"].to_json(f"data/{KLUE_TASKS[p_args.task]}/validation.json", orient="records", force_ascii=False, indent=2, lines=False, )
+    #exit()
     aug_data = DataAugmentationMethod(dataset=datasets, dataset_name=KLUE_TASKS[p_args.task],
      sentence1=sentence1_key, sentence2=sentence2_key, bt=p_args.aug_bt, eda=[False, False, p_args.aug_rs, p_args.aug_rd])
     aug_data.do_direct_aug()
@@ -130,7 +133,7 @@ if p_args.aug_rd:
     augment_list.append("_random_deletion")
 if p_args.aug_rs:
     augment_list.append("_random_swap")
-for i in augment_list:
+for i in augment_list:     
     data_files["train"].append(f"{data_dir}{i}/train.json")
     data_files["validation"].append(f"{data_dir}{i}/validation.json")
 datasets = load_dataset("json", data_dir=data_dir, data_files=data_files, field='data')
@@ -241,9 +244,21 @@ path = f'{p_args.result_dir}model_{p_args.model}_lr_{p_args.lr}_wr_{p_args.wr}_w
 mode = 'a' if os.path.isfile(path) else 'w'
 
 with open(path, mode) as f:
-    result = {
-        'seed': p_args.seed,
-        f'{KLUE_TASKS[p_args.task]}': test_result,
-        'time': elapsed_time,
-    }
+    if p_args.aug:
+        result = {
+            'seed': p_args.seed,
+            'aug': {
+                'bt': p_args.bt,
+                'rd': p_args.rd,
+                'rs': p_args.rs
+            },
+            f'{KLUE_TASKS[p_args.task]}': test_result,
+            'time': elapsed_time,
+        }
+    else:
+        result = {
+            'seed': p_args.seed,
+            f'{KLUE_TASKS[p_args.task]}': test_result,
+            'time': elapsed_time,
+        }
     json.dump(result, f, indent=2)
