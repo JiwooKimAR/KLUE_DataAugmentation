@@ -245,21 +245,19 @@ class DataAugmentationMethod:
         for k in range(len(self.dataset["train"][self.sentence1])):
             org = self.dataset["train"][k]
             if self.sentence2 == None:
-                for j in range(self.bt_num):
-                    aug_sentences = RS(org[self.sentence1], self.alpha, self.eda_num)
-                    for s in aug_sentences:
-                        org[self.sentence1] = s
-                        out_train_json.append(org.copy())
+                aug_sentences = RS(org[self.sentence1], self.alpha, self.eda_num)
+                for s in aug_sentences:
+                    org[self.sentence1] = s
+                    out_train_json.append(org.copy())
             else:
-                for j in range(self.bt_num):
-                    aug_sentences = RS(org[self.sentence1], self.alpha, self.eda_num)
-                    for s in aug_sentences:
-                        org[self.sentence1] = s
-                        out_train_json.append(org.copy())
-                    aug_sentences = RS(org[self.sentence2], self.alpha, self.eda_num)
-                    for s in aug_sentences:
-                        org[self.sentence2] = s
-                        out_train_json.append(org.copy())
+                aug_sentences = RS(org[self.sentence1], self.alpha, self.eda_num)
+                for s in aug_sentences:
+                    org[self.sentence1] = s
+                    out_train_json.append(org.copy())
+                aug_sentences = RS(org[self.sentence2], self.alpha, self.eda_num)
+                for s in aug_sentences:
+                    org[self.sentence2] = s
+                    out_train_json.append(org.copy())
             
         with open(out_train, 'w') as f:
             json.dump(out_train_json, f, indent=2, ensure_ascii=False)

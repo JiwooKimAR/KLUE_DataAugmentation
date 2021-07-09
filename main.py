@@ -15,11 +15,15 @@ from transformers import (
     Trainer,
     DataCollatorForTokenClassification,
     AutoModelForTokenClassification,
+    AutoModelForQuestionAnswering,
+    default_data_collator,
 )
 
-from utils import ( set_seed, NER_CLASSES, get_label_list, re_preprocessing, str2bool, )
+from utils import ( set_seed, NER_CLASSES, get_label_list, re_preprocessing, str2bool, postprocess_qa_predictions, )
 from data_augmentation import DataAugmentationMethod
 from mixup.utils import MixupAutoModelForSequenceClassification, MixupTrainer
+from model.MRCTranier import QuestionAnsweringTrainer
+from model.callbacks import Callbacks
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int, help='Seed')
@@ -33,9 +37,9 @@ parser.add_argument('--wd', default=0., type=float, help='weight decay coefficie
 parser.add_argument('--batch_size', default=8, type=int, help='batch size [8, 16, 32]')
 parser.add_argument('--total_epochs', default=3, type=int, help='number of epochs [3, 4, 5, 10]')
 parser.add_argument('--aug', default=False, type=str2bool, help="Do augmentation or not")
-parser.add_argument('--aug_bt', default=True, type=str2bool, help="DA: Back translation")
-parser.add_argument('--aug_rd', default=True, type=str2bool, help="DA: Random Swap")
-parser.add_argument('--aug_rs', default=True, type=str2bool, help="DA: Random Deletion")
+parser.add_argument('--aug_bt', default=False, type=str2bool, help="DA: Back translation")
+parser.add_argument('--aug_rd', default=False, type=str2bool, help="DA: Random Swap")
+parser.add_argument('--aug_rs', default=False, type=str2bool, help="DA: Random Deletion")
 parser.add_argument('--mixup', default=False, type=str2bool, help="Mixup Method (LogitMix, MixOnGLUE)<-Should be modified manually in mixup/utils.py")
 
 p_args = parser.parse_args()
@@ -52,7 +56,7 @@ NER(Named Entity Recognition), RE(Relation Extraction), DP(Dependency Parsing),
 MRC(Machine Reading Comprehension), DST(Dialogue State Tracking)
 """
 KLUE_TASKS = ["ynat", "sts", "nli", "ner", "re", "dp", "mrc", "wos"]
-KLUE_TASKS_REGRESSION = [False, True, False, False, False, ]
+KLUE_TASKS_REGRESSION = [False, True, False, False, False, False, False, False]
 task_to_keys = {
     "ynat": ("title", None), # Macro F1 score
     "sts": ("sentence1", "sentence2"), # Pearson correlation coefficient, Macro F1 score
@@ -60,7 +64,7 @@ task_to_keys = {
     "ner": ("tokens", "ner_tags"), # Entity-level F1 score, Character-level F1 score
     "re": ("sentence", None), # Micro F1 score, AUPRC(averaged area under the precision recall curves)
     "dp": (), # ?
-    "mrc": (), # ?
+    "mrc": (None ,None), # ?
     "wos": (), # ?
 }
 sentence1_key, sentence2_key = task_to_keys[KLUE_TASKS[p_args.task]]
@@ -104,7 +108,8 @@ def compute_metrics(p: EvalPrediction):
         return results
     else:
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-        preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
+        if p_args.task != 6:
+            preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
         result = metric.compute(predictions=preds, references=p.label_ids)
         if len(result) > 1:
             result["combined_score"] = np.mean(list(result.values())).item()
@@ -143,12 +148,14 @@ metric = load_metric('./metric.py', KLUE_TASKS[p_args.task])
 
 # Load the pre-trained model
 label_list = []
-if p_args.task != 1:
+if p_args.task != 1 and p_args.task != 6:
     label_list = get_label_list(datasets["train"][label_column_name], p_args.task)
 num_labels = 1 if is_regression else len(label_list)
 if p_args.task == 3:
     model = AutoModelForTokenClassification.from_pretrained(f"klue/{p_args.model}", num_labels=num_labels)
     label_to_id = {l: i for i, l in enumerate(label_list)}
+elif p_args.task == 6:
+    model = AutoModelForQuestionAnswering.from_pretrained(f"klue/{p_args.model}")
 else:
     if p_args.mixup:
         model = MixupAutoModelForSequenceClassification.from_pretrained(f"klue/{p_args.model}", num_labels=num_labels)
@@ -191,12 +198,164 @@ def tokenize_and_align_labels(examples):
     tokenized_inputs["labels"] = labels
     return tokenized_inputs
 
+def prepare_train_features(examples):
+    # Preprocessing is slightly different for training and evaluation
+    question_column_name = "question"
+    context_column_name = "context"
+    answer_column_name = "answers"
+
+    # Padding side determines if we do (question|context) or (context|question)
+    pad_on_right = tokenizer.padding_side == "right"
+    
+    tokenized_examples = tokenizer(
+        examples[question_column_name if pad_on_right else context_column_name],
+        examples[context_column_name if pad_on_right else question_column_name],
+        truncation="only_second" if pad_on_right else "only_first",
+        max_length=max_sequence_length,
+        stride=128,
+        return_overflowing_tokens=True,
+        return_offsets_mapping=True,
+        padding="max_length"
+    )
+
+    sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
+    offset_mapping = tokenized_examples.pop("offset_mapping")
+
+    tokenized_examples["start_positions"] = []
+    tokenized_examples["end_positions"] = []
+
+    for i, offsets in enumerate(offset_mapping):
+        # We will label impossible answers with the index of the CLS tokens
+        input_ids = tokenized_examples["input_ids"][i]
+        cls_index = input_ids.index(tokenizer.cls_token_id)
+
+        # Grab the sequence corresponding to that example (to know what is the context and what is the question).
+        sequence_ids = tokenized_examples.sequence_ids(i)
+
+        # One example can give several spans, this is the index of the example containing this span of text.
+        sample_index = sample_mapping[i]
+        answers = examples[answer_column_name][sample_index]
+        # If no answers are given, set the cls_index as answer.
+        if len(answers["answer_start"]) == 0:
+            tokenized_examples["start_positions"].append(cls_index)
+            tokenized_examples["end_positions"].append(cls_index)
+        else:
+            # Start/end character index of the answer in the text.
+            start_char = answers["answer_start"][0]
+            end_char = start_char + len(answers["text"][0])
+
+            # Start token index of the current span in the text.
+            token_start_index = 0
+            while sequence_ids[token_start_index] != (1 if pad_on_right else 0):
+                token_start_index += 1
+
+            # End token index of the current span in the text.
+            token_end_index = len(input_ids) - 1
+            while sequence_ids[token_end_index] != (1 if pad_on_right else 0):
+                token_end_index -= 1
+
+            # Detect if the answer is out of the span (in which case this feature is labeled with the CLS index).
+            if not (offsets[token_start_index][0] <= start_char and offsets[token_end_index][1] >= end_char):
+                tokenized_examples["start_positions"].append(cls_index)
+                tokenized_examples["end_positions"].append(cls_index)
+            else:
+                # Otherwise move the token_start_index and token_end_index to the two ends of the answer.
+                # Note: we could go after the last offset if the answer is the last word (edge case).
+                while token_start_index < len(offsets) and offsets[token_start_index][0] <= start_char:
+                    token_start_index += 1
+                tokenized_examples["start_positions"].append(token_start_index - 1)
+                while offsets[token_end_index][1] >= end_char:
+                    token_end_index -= 1
+                tokenized_examples["end_positions"].append(token_end_index + 1)
+
+    return tokenized_examples
+
+def prepare_validation_features(examples):
+    # Preprocessing is slightly different for training and evaluation
+    question_column_name = "question"
+    context_column_name = "context"
+    answer_column_name = "answers"
+
+    # Padding side determines if we do (question|context) or (context|question)
+    pad_on_right = tokenizer.padding_side == "right"
+
+    # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
+    # in one example possible giving several features when a context is long, each of those features having a
+    # context that overlaps a bit the context of the previous feature.
+    tokenized_examples = tokenizer(
+        examples[question_column_name if pad_on_right else context_column_name],
+        examples[context_column_name if pad_on_right else question_column_name],
+        truncation="only_second" if pad_on_right else "only_first",
+        max_length=max_sequence_length,
+        stride=128,
+        return_overflowing_tokens=True,
+        return_offsets_mapping=True,
+        padding="max_length"
+    )
+
+    # Since one example might give us several features if it has a long context, we need a map from a feature to
+    # its corresponding example. This key gives us just that.
+    sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
+
+    # For evaluation, we will need to convert our predictions to substrings of the context, so we keep the
+    # corresponding example_id and we will store the offset mappings.
+    tokenized_examples["example_id"] = []
+
+    for i in range(len(tokenized_examples["input_ids"])):
+        # Grab the sequence corresponding to that example (to know what is the context and what is the question).
+        sequence_ids = tokenized_examples.sequence_ids(i)
+        context_index = 1 if pad_on_right else 0
+
+        # One example can give several spans, this is the index of the example containing this span of text.
+        sample_index = sample_mapping[i]
+        tokenized_examples["example_id"].append(examples["guid"][sample_index])
+
+        # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
+        # position is part of the context or not.
+        tokenized_examples["offset_mapping"][i] = [
+            (o if sequence_ids[k] == context_index else None)
+            for k, o in enumerate(tokenized_examples["offset_mapping"][i])
+        ]
+
+    return tokenized_examples
+
+# Post-processing:
+def post_processing_function(examples, features, predictions, stage="eval"):
+    answer_column_name = "answers"
+
+    # Post-processing: we match the start logits and end logits to answers in the original context.
+    predictions = postprocess_qa_predictions(
+        examples=examples,
+        features=features,
+        predictions=predictions,
+        version_2_with_negative=False,
+        n_best_size=20,
+        max_answer_length=30,
+        null_score_diff_threshold=0.0,
+        output_dir="data/mrc/",
+        prefix=stage,
+    )
+    # Format the result to the format the metric expects.
+    formatted_predictions = [{"guid": k, "prediction_text": v} for k, v in predictions.items()]
+
+    references = [{"guid": ex["guid"], "answers": ex[answer_column_name]} for ex in examples]
+    return EvalPrediction(predictions=formatted_predictions, label_ids=references)
+
 tokenizer = AutoTokenizer.from_pretrained(f"klue/{p_args.model}")
-if p_args.task != 3:
-    preprocessed_datasets = datasets.map(preprocess_function, batched=True)
-else:
+if p_args.task == 3:
     preprocessed_datasets = datasets.map(tokenize_and_align_labels, batched=True)
     data_collator = DataCollatorForTokenClassification(tokenizer)
+elif p_args.task == 6:
+    column_names = datasets["train"].column_names
+    train_dataset = datasets["train"]
+    train_dataset = train_dataset.map(prepare_train_features, batched=True, remove_columns=column_names)
+    column_names = datasets["validation"].column_names
+    validation_examples = datasets["validation"]
+    validation_dataset = validation_examples.map(prepare_validation_features, batched=True, remove_columns=column_names)
+    data_collator = (default_data_collator)
+else:
+    preprocessed_datasets = datasets.map(preprocess_function, batched=True)
+    
 
 # Learning rate [1e-5, 2e-5, 3e-5, 5e-5]
 # warm-up ratio [0., 0.1, 0.2, 0.6]
@@ -204,39 +363,66 @@ else:
 # batch size [8, 16, 32]
 # number of epochs [3, 4, 5, 10]
 args = TrainingArguments(
-    output_dir=p_args.output_dir,
-    evaluation_strategy='epoch',
-    learning_rate=p_args.lr,
-    per_device_train_batch_size=p_args.batch_size,
-    per_device_eval_batch_size=p_args.batch_size,
-    num_train_epochs=p_args.total_epochs,
-    weight_decay=p_args.wd,
-    warmup_ratio=p_args.wr,
-    seed=p_args.seed,
-    save_total_limit=1,
-)
-
-if p_args.mixup:
-    trainer = MixupTrainer(
-        model,
-        args,
-        train_dataset=preprocessed_datasets["train"],
-        eval_dataset=preprocessed_datasets["validation"],
-        tokenizer=tokenizer,
-        compute_metrics=compute_metrics,
+        output_dir=p_args.output_dir,
+        evaluation_strategy='epoch',
+        learning_rate=p_args.lr,
+        per_device_train_batch_size=p_args.batch_size,
+        per_device_eval_batch_size=p_args.batch_size,
+        num_train_epochs=p_args.total_epochs,
+        weight_decay=p_args.wd,
+        warmup_ratio=p_args.wr,
+        seed=p_args.seed,
+        save_total_limit=1,
+        logging_strategy="no",
     )
-else:
+
+if p_args.task == 3:
     trainer = Trainer(
         model,
         args,
         train_dataset=preprocessed_datasets["train"],
         eval_dataset=preprocessed_datasets["validation"],
         tokenizer=tokenizer,
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
+elif p_args.task == 6:
+    trainer = QuestionAnsweringTrainer(
+        model=model,
+        args=args,
+        train_dataset=train_dataset,
+        eval_dataset=validation_dataset,
+        eval_examples=validation_examples,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        post_process_function=post_processing_function,
+        compute_metrics=compute_metrics,
+    )
+else:
+    if p_args.mixup:
+        trainer = MixupTrainer(
+            model,
+            args,
+            train_dataset=preprocessed_datasets["train"],
+            eval_dataset=preprocessed_datasets["validation"],
+            tokenizer=tokenizer,
+            compute_metrics=compute_metrics,
+        )
+    else:
+        trainer = Trainer(
+            model,
+            args,
+            train_dataset=preprocessed_datasets["train"],
+            eval_dataset=preprocessed_datasets["validation"],
+            tokenizer=tokenizer,
+            compute_metrics=compute_metrics,
+        )
 
+#trainer.add_callback(Callbacks)
 trainer.train()
-test_result = trainer.evaluate()
+trainer.evaluate()
+
+log_history = trainer.state.log_history
 
 elapsed_time = (time.time() - start) / 60 # Min.
 
@@ -248,17 +434,17 @@ with open(path, mode) as f:
         result = {
             'seed': p_args.seed,
             'aug': {
-                'bt': p_args.bt,
-                'rd': p_args.rd,
-                'rs': p_args.rs
+                'bt': p_args.aug_bt,
+                'rd': p_args.aug_rd,
+                'rs': p_args.aug_rs
             },
-            f'{KLUE_TASKS[p_args.task]}': test_result,
+            f'{KLUE_TASKS[p_args.task]}': log_history,
             'time': elapsed_time,
         }
     else:
         result = {
             'seed': p_args.seed,
-            f'{KLUE_TASKS[p_args.task]}': test_result,
+            f'{KLUE_TASKS[p_args.task]}': log_history,
             'time': elapsed_time,
         }
     json.dump(result, f, indent=2)
