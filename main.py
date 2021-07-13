@@ -131,6 +131,7 @@ if p_args.aug:
 
 data_dir = f"data/{KLUE_TASKS[p_args.task]}"
 data_files = {"train": [], "validation": []}
+data_files["validation"].append(f"{data_dir}/validation.json")
 augment_list = [""]
 if p_args.aug_bt:
     augment_list.append("_back_translation")
@@ -140,7 +141,7 @@ if p_args.aug_rs:
     augment_list.append("_random_swap")
 for i in augment_list:     
     data_files["train"].append(f"{data_dir}{i}/train.json")
-    data_files["validation"].append(f"{data_dir}{i}/validation.json")
+    #data_files["validation"].append(f"{data_dir}{i}/validation.json")
 datasets = load_dataset("json", data_dir=data_dir, data_files=data_files, field='data')
 
 # Load the metric
