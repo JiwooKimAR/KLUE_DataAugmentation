@@ -64,7 +64,7 @@ task_to_keys = {
     "ner": ("tokens", "ner_tags"), # Entity-level F1 score, Character-level F1 score
     "re": ("sentence", None), # Micro F1 score, AUPRC(averaged area under the precision recall curves)
     "dp": (), # ?
-    "mrc": (None ,None), # ?
+    "mrc": ("question" ,"context"), # ?
     "wos": (), # ?
 }
 sentence1_key, sentence2_key = task_to_keys[KLUE_TASKS[p_args.task]]
@@ -131,7 +131,6 @@ if p_args.aug:
 
 data_dir = f"data/{KLUE_TASKS[p_args.task]}"
 data_files = {"train": [], "validation": []}
-data_files["validation"].append(f"{data_dir}/validation.json")
 augment_list = [""]
 if p_args.aug_bt:
     augment_list.append("_back_translation")
@@ -141,7 +140,7 @@ if p_args.aug_rs:
     augment_list.append("_random_swap")
 for i in augment_list:     
     data_files["train"].append(f"{data_dir}{i}/train.json")
-    #data_files["validation"].append(f"{data_dir}{i}/validation.json")
+    data_files["validation"].append(f"{data_dir}{i}/validation.json")
 datasets = load_dataset("json", data_dir=data_dir, data_files=data_files, field='data')
 
 # Load the metric

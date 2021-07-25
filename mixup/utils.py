@@ -57,8 +57,8 @@ logger = logging.get_logger(__name__)
 MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING = collections.OrderedDict(
     [
         # Model for Sequence Classification mapping
-        #(BertConfig, MixupBertForSequenceClassification),
-        (BertConfig, LogitMixBertForSequenceClassification),
+        (BertConfig, MixupBertForSequenceClassification),
+        #(BertConfig, LogitMixBertForSequenceClassification),
         #(RobertaConfig, LogitMixRobertaForSequenceClassification)
         #(BertConfig, BertForSequenceClassification)
     ]

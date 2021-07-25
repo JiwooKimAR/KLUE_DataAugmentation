@@ -28,6 +28,40 @@ def get_only_chars(line):
         clean_line = clean_line[1:]
     return clean_line
 
+stop_words = []
+
+def synonym_replacement(words, n):
+	new_words = words.copy()
+	random_word_list = list(set([word for word in words if word not in stop_words]))
+	random.shuffle(random_word_list)
+	num_replaced = 0
+	for random_word in random_word_list:
+		synonyms = get_synonyms(random_word)
+		if len(synonyms) >= 1:
+			synonym = random.choice(list(synonyms))
+			new_words = [synonym if word == random_word else word for word in new_words]
+			#print("replaced", random_word, "with", synonym)
+			num_replaced += 1
+		if num_replaced >= n: #only replace up to n words
+			break
+
+	#this is stupid but we need it, trust me
+	sentence = ' '.join(new_words)
+	new_words = sentence.split(' ')
+
+	return new_words
+
+def get_synonyms(word):
+	synonyms = set()
+	for syn in wordnet.synsets(word): 
+		for l in syn.lemmas(): 
+			synonym = l.name().replace("_", " ").replace("-", " ").lower()
+			synonym = "".join([char for char in synonym if char in ' qwertyuiopasdfghjklzxcvbnm'])
+			synonyms.add(synonym) 
+	if word in synonyms:
+		synonyms.remove(word)
+	return list(synonyms)
+
 def random_deletion(words, p):
 	#obviously, if there's only one word, don't delete it
 	if len(words) == 1:
@@ -224,12 +258,31 @@ class DataAugmentationMethod:
 
     # Code from EDA
     def synonym_replacement(self):
-        a = 1
+        if not self.flag_sr:
+            return False
+
+        print("## Synonym Replacement Start ##")
+        outdir = self.out_dir + "_synonym_replacement/"
+        if self.is_exists(outdir):
+            return True
+
+        pathlib.Path(outdir).mkdir(exist_ok=True, parents=True)
+        out_train = outdir + "train.json"
+        out_validation = outdir + "validation.json"
+
+        out_train_json = []
+        out_validation_json = []
+    
+        return True
 
     def random_insertion(self):
         a = 1
 
     def random_swap(self):
+        if not self.flag_rs:
+            return False
+
+        print("## Random Swap Start ##")
         outdir = self.output_dir + "_random_swap/"
         if self.is_exists(outdir):
             return True
